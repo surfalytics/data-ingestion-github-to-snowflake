@@ -19,6 +19,24 @@ Parameters:
     AllowedPattern: '^[\w+=,.@-]{1,64}$'
     Description: IAM user that receives programmatic keys for uploads.
 
+  GitHubTokenSecretName:
+    Type: String
+    Default: surfalytics/data-ingestion/github-token
+    Description: Secrets Manager secret name for the GitHub PAT.
+
+  AllowListAllMyBuckets:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      If true, grants s3:ListAllMyBuckets so `aws s3 ls` (no bucket argument) works.
+      User can see bucket names across the account; object access stays limited to
+      this stack's bucket. If false, list objects only with
+      `aws s3 ls s3://<bucket-name>/`.
+
+Conditions:
+  ListAllBucketsEnabled: !Equals [!Ref AllowListAllMyBuckets, 'true']
+
 Resources:
   RawCsvBucket:
     Type: AWS::S3::Bucket
@@ -68,10 +86,87 @@ Resources:
               - s3:GetObject
             Resource: !Sub '${RawCsvBucket.Arn}/*'
 
+  IngestionListAllBucketsPolicy:
+    Type: AWS::IAM::Policy
+    Condition: ListAllBucketsEnabled
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-list-all-bucket-names'
+      Users:
+        - !Ref IngestionUser
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListAllMyBucketsForCli
+            Effect: Allow
+            Action: s3:ListAllMyBuckets
+            Resource: '*'
+
+  IngestionSecretsManagerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-secrets-manager-access'
+      Users:
+        - !Ref IngestionUser
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ManageGitHubTokenSecret
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:PutSecretValue
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+            Resource:
+              - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GitHubTokenSecretName}-*'
+
   IngestionAccessKey:
     Type: AWS::IAM::AccessKey
     Properties:
       UserName: !Ref IngestionUser
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: surfalytics-lambda-github-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteRawCsv
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub '${RawCsvBucket.Arn}/*'
+              - Sid: ListRawCsvBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt RawCsvBucket.Arn
+        - PolicyName: LambdaSecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadGitHubTokenSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GitHubTokenSecretName}-*'
+      Tags:
+        - Key: Purpose
+          Value: surfalytics-lambda-github-ingest
 
 Outputs:
   BucketName:
@@ -105,3 +200,9 @@ Outputs:
       Secret access key (shown once here and in stack outputs; copy to a password
       manager and rotate if exposed).
     Value: !GetAtt IngestionAccessKey.SecretAccessKey
+
+  LambdaExecutionRoleArn:
+    Description: IAM role ARN for the Lambda function (pass to deploy.sh as ROLE_ARN).
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaExecutionRoleArn'
