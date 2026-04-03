@@ -1,8 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  S3 bucket for raw CSV plus IAM user (programmatic access) with least-privilege
-  S3 policy (ListBucket, PutObject, GetObject). Deploy into the region where you
-  want the bucket; that region is the bucket's home region.
+  S3 bucket for raw CSV, IAM policies for the existing ingestion user,
+  and Lambda execution role. Deploy with CAPABILITY_NAMED_IAM.
 
 Parameters:
   BucketNamePrefix:
@@ -11,13 +10,13 @@ Parameters:
     AllowedPattern: '^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$'
     ConstraintDescription: Lowercase letters, numbers, hyphens; 3–50 chars; start/end alphanumeric.
     Description: >
-      Globally unique name is ${Prefix}-${AWS::AccountId} (account ID ensures uniqueness).
+      Globally unique bucket name is ${Prefix}-${AWS::AccountId}.
 
   IngestionUserName:
     Type: String
     Default: surfalytics-s3-ingestion
     AllowedPattern: '^[\w+=,.@-]{1,64}$'
-    Description: IAM user that receives programmatic keys for uploads.
+    Description: Existing IAM user that receives policies for S3, Secrets Manager, and Lambda.
 
   GitHubTokenSecretName:
     Type: String
@@ -29,62 +28,35 @@ Parameters:
     Default: 'true'
     AllowedValues: ['true', 'false']
     Description: >
-      If true, grants s3:ListAllMyBuckets so `aws s3 ls` (no bucket argument) works.
-      User can see bucket names across the account; object access stays limited to
-      this stack's bucket. If false, list objects only with
-      `aws s3 ls s3://<bucket-name>/`.
+      If true, grants s3:ListAllMyBuckets so `aws s3 ls` works without a bucket argument.
 
 Conditions:
   ListAllBucketsEnabled: !Equals [!Ref AllowListAllMyBuckets, 'true']
 
 Resources:
-  RawCsvBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      BucketName: !Sub '${BucketNamePrefix}-${AWS::AccountId}'
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      Tags:
-        - Key: Purpose
-          Value: raw-csv-ingestion
 
-  IngestionUser:
-    Type: AWS::IAM::User
-    Properties:
-      UserName: !Ref IngestionUserName
-      Tags:
-        - Key: Purpose
-          Value: surfalytics-data-ingestion
+  # ── IAM Policies for existing ingestion user ──────────────────────────────────
+  # Note: The S3 bucket already exists outside this stack and is referenced by ARN.
 
-  IngestionUserPolicy:
+  IngestionUserS3Policy:
     Type: AWS::IAM::Policy
     Properties:
       PolicyName: !Sub '${AWS::StackName}-raw-s3-access'
       Users:
-        - !Ref IngestionUser
+        - !Ref IngestionUserName
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Sid: ListBucket
             Effect: Allow
-            Action:
-              - s3:ListBucket
-            Resource: !GetAtt RawCsvBucket.Arn
+            Action: s3:ListBucket
+            Resource: !Sub 'arn:aws:s3:::${BucketNamePrefix}-${AWS::AccountId}'
           - Sid: ObjectReadWrite
             Effect: Allow
             Action:
               - s3:PutObject
               - s3:GetObject
-            Resource: !Sub '${RawCsvBucket.Arn}/*'
+            Resource: !Sub 'arn:aws:s3:::${BucketNamePrefix}-${AWS::AccountId}/*'
 
   IngestionListAllBucketsPolicy:
     Type: AWS::IAM::Policy
@@ -92,7 +64,7 @@ Resources:
     Properties:
       PolicyName: !Sub '${AWS::StackName}-list-all-bucket-names'
       Users:
-        - !Ref IngestionUser
+        - !Ref IngestionUserName
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -106,7 +78,7 @@ Resources:
     Properties:
       PolicyName: !Sub '${AWS::StackName}-secrets-manager-access'
       Users:
-        - !Ref IngestionUser
+        - !Ref IngestionUserName
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -120,10 +92,39 @@ Resources:
             Resource:
               - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GitHubTokenSecretName}-*'
 
-  IngestionAccessKey:
-    Type: AWS::IAM::AccessKey
+  IngestionLambdaPolicy:
+    Type: AWS::IAM::Policy
     Properties:
-      UserName: !Ref IngestionUser
+      PolicyName: !Sub '${AWS::StackName}-lambda-deploy'
+      Users:
+        - !Ref IngestionUserName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaDeploy
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:GetFunction
+              - lambda:GetFunctionConfiguration
+              - lambda:InvokeFunction
+              - lambda:ListFunctions
+            Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:surfalytics-*'
+          - Sid: PassRoleToLambda
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt LambdaExecutionRole.Arn
+          - Sid: CloudWatchLogsRead
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+              - logs:GetLogEvents
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/surfalytics-*'
+
+  # ── Lambda Execution Role ─────────────────────────────────────────────────────
 
   LambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -148,11 +149,11 @@ Resources:
                 Action:
                   - s3:PutObject
                   - s3:GetObject
-                Resource: !Sub '${RawCsvBucket.Arn}/*'
+                Resource: !Sub 'arn:aws:s3:::${BucketNamePrefix}-${AWS::AccountId}/*'
               - Sid: ListRawCsvBucket
                 Effect: Allow
                 Action: s3:ListBucket
-                Resource: !GetAtt RawCsvBucket.Arn
+                Resource: !Sub 'arn:aws:s3:::${BucketNamePrefix}-${AWS::AccountId}'
         - PolicyName: LambdaSecretsManagerAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -170,39 +171,25 @@ Resources:
 
 Outputs:
   BucketName:
-    Description: S3 bucket for raw CSV (use with boto3 / AWS CLI).
-    Value: !Ref RawCsvBucket
+    Description: S3 bucket for raw CSV.
+    Value: !Sub '${BucketNamePrefix}-${AWS::AccountId}'
     Export:
       Name: !Sub '${AWS::StackName}-BucketName'
 
   BucketArn:
     Description: Bucket ARN.
-    Value: !GetAtt RawCsvBucket.Arn
+    Value: !Sub 'arn:aws:s3:::${BucketNamePrefix}-${AWS::AccountId}'
     Export:
       Name: !Sub '${AWS::StackName}-BucketArn'
 
   AwsRegion:
-    Description: Region this stack (and bucket) was created in.
+    Description: Region this stack was deployed in.
     Value: !Ref AWS::Region
     Export:
       Name: !Sub '${AWS::StackName}-AwsRegion'
 
-  IngestionUserArn:
-    Description: IAM user ARN.
-    Value: !GetAtt IngestionUser.Arn
-
-  IngestionAccessKeyId:
-    Description: Access key ID for the ingestion user (store securely).
-    Value: !Ref IngestionAccessKey
-
-  IngestionSecretAccessKey:
-    Description: >
-      Secret access key (shown once here and in stack outputs; copy to a password
-      manager and rotate if exposed).
-    Value: !GetAtt IngestionAccessKey.SecretAccessKey
-
   LambdaExecutionRoleArn:
-    Description: IAM role ARN for the Lambda function (pass to deploy.sh as ROLE_ARN).
+    Description: IAM role ARN for the Lambda function.
     Value: !GetAtt LambdaExecutionRole.Arn
     Export:
       Name: !Sub '${AWS::StackName}-LambdaExecutionRoleArn'
