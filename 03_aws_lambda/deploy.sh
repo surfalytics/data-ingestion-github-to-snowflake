@@ -22,7 +22,7 @@ echo ">>> Building deployment ZIP..."
 rm -rf package && mkdir package
 
 # Install only what's not in the pandas layer (requests + rich)
-pip install requests rich --quiet --target package/
+pip install requests rich --quiet --isolated --target package/
 
 # Copy the handler
 cp src/extract_github_data.py package/
