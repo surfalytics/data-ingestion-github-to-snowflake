@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  S3 bucket for raw CSV, IAM policies for the existing ingestion user,
-  and Lambda execution role. Deploy with CAPABILITY_NAMED_IAM.
+  IAM managed policies for the existing ingestion user, and Lambda execution role.
+  The S3 bucket and IAM user already exist outside this stack and are referenced by name.
+  Deploy with CAPABILITY_NAMED_IAM.
 
 Parameters:
   BucketNamePrefix:
@@ -9,39 +10,29 @@ Parameters:
     Default: surfalytics-raw-csv
     AllowedPattern: '^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$'
     ConstraintDescription: Lowercase letters, numbers, hyphens; 3–50 chars; start/end alphanumeric.
-    Description: >
-      Globally unique bucket name is ${Prefix}-${AWS::AccountId}.
+    Description: Bucket name is ${Prefix}-${AWS::AccountId}.
 
   IngestionUserName:
     Type: String
     Default: surfalytics-s3-ingestion
     AllowedPattern: '^[\w+=,.@-]{1,64}$'
-    Description: Existing IAM user that receives policies for S3, Secrets Manager, and Lambda.
+    Description: Existing IAM user that receives managed policies.
 
   GitHubTokenSecretName:
     Type: String
     Default: surfalytics/data-ingestion/github-token
     Description: Secrets Manager secret name for the GitHub PAT.
 
-  AllowListAllMyBuckets:
-    Type: String
-    Default: 'true'
-    AllowedValues: ['true', 'false']
-    Description: >
-      If true, grants s3:ListAllMyBuckets so `aws s3 ls` works without a bucket argument.
-
-Conditions:
-  ListAllBucketsEnabled: !Equals [!Ref AllowListAllMyBuckets, 'true']
-
 Resources:
 
-  # ── IAM Policies for existing ingestion user ──────────────────────────────────
-  # Note: The S3 bucket already exists outside this stack and is referenced by ARN.
+  # ── Customer managed policies attached to the existing ingestion user ─────────
+  # Using AWS::IAM::ManagedPolicy (6144-byte limit) instead of inline policies
+  # (2048-byte limit) to avoid hitting the per-user inline policy size cap.
 
-  IngestionUserS3Policy:
-    Type: AWS::IAM::Policy
+  IngestionS3Policy:
+    Type: AWS::IAM::ManagedPolicy
     Properties:
-      PolicyName: !Sub '${AWS::StackName}-raw-s3-access'
+      ManagedPolicyName: !Sub '${AWS::StackName}-s3-access'
       Users:
         - !Ref IngestionUserName
       PolicyDocument:
@@ -57,26 +48,15 @@ Resources:
               - s3:PutObject
               - s3:GetObject
             Resource: !Sub 'arn:aws:s3:::${BucketNamePrefix}-${AWS::AccountId}/*'
-
-  IngestionListAllBucketsPolicy:
-    Type: AWS::IAM::Policy
-    Condition: ListAllBucketsEnabled
-    Properties:
-      PolicyName: !Sub '${AWS::StackName}-list-all-bucket-names'
-      Users:
-        - !Ref IngestionUserName
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: ListAllMyBucketsForCli
+          - Sid: ListAllBuckets
             Effect: Allow
             Action: s3:ListAllMyBuckets
             Resource: '*'
 
   IngestionSecretsManagerPolicy:
-    Type: AWS::IAM::Policy
+    Type: AWS::IAM::ManagedPolicy
     Properties:
-      PolicyName: !Sub '${AWS::StackName}-secrets-manager-access'
+      ManagedPolicyName: !Sub '${AWS::StackName}-secrets-manager-access'
       Users:
         - !Ref IngestionUserName
       PolicyDocument:
@@ -93,9 +73,9 @@ Resources:
               - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GitHubTokenSecretName}-*'
 
   IngestionLambdaPolicy:
-    Type: AWS::IAM::Policy
+    Type: AWS::IAM::ManagedPolicy
     Properties:
-      PolicyName: !Sub '${AWS::StackName}-lambda-deploy'
+      ManagedPolicyName: !Sub '${AWS::StackName}-lambda-deploy'
       Users:
         - !Ref IngestionUserName
       PolicyDocument:
@@ -112,6 +92,10 @@ Resources:
               - lambda:InvokeFunction
               - lambda:ListFunctions
             Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:surfalytics-*'
+          - Sid: LambdaLayerRead
+            Effect: Allow
+            Action: lambda:GetLayerVersion
+            Resource: 'arn:aws:lambda:*:*:layer:*'
           - Sid: PassRoleToLambda
             Effect: Allow
             Action: iam:PassRole

@@ -74,7 +74,7 @@ if [ -z "$EXISTING" ]; then
     --timeout "$TIMEOUT" \
     --memory-size "$MEMORY" \
     --layers "$PANDAS_LAYER_ARN" \
-    --environment "Variables={S3_BUCKET=$S3_BUCKET,AWS_REGION=$AWS_REGION}" \
+    --environment "Variables={S3_BUCKET=$S3_BUCKET}" \
     --output text --query 'FunctionArn'
 else
   echo "    Updating existing function..."
@@ -88,7 +88,7 @@ else
     --timeout "$TIMEOUT" \
     --memory-size "$MEMORY" \
     --layers "$PANDAS_LAYER_ARN" \
-    --environment "Variables={S3_BUCKET=$S3_BUCKET,AWS_REGION=$AWS_REGION}" \
+    --environment "Variables={S3_BUCKET=$S3_BUCKET}" \
     --output text --query 'FunctionArn'
 fi
 
