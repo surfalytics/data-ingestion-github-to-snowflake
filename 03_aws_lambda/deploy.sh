@@ -94,4 +94,4 @@ fi
 
 echo ""
 echo "✓ Done. To invoke:"
-echo "  aws lambda invoke --function-name $FUNCTION_NAME --payload '{\"target_rows\":1000}' response.json --profile $AWS_PROFILE && cat response.json"
+echo "  aws lambda invoke --cli-binary-format raw-in-base64-out --function-name $FUNCTION_NAME --payload '{\"target_rows\":1000}' response.json --profile $AWS_PROFILE && cat response.json"

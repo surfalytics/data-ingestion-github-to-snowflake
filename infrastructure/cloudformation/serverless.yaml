@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Serverless Framework deploy permissions for the surfalytics ingestion user.
+  Adds CloudFormation stack management, deployment S3 bucket, Lambda lifecycle,
+  and CloudWatch log group permissions so the surfalytics-lab user can run
+  `serverless deploy` for the GitHub ingest service.
+  Deploy with: bash infrastructure/scripts/deploy-stack.sh serverless
+
+Parameters:
+  IngestionUserName:
+    Type: String
+    Default: surfalytics-s3-ingestion
+    Description: IAM user that receives this managed policy.
+
+  ServerlessServicePrefix:
+    Type: String
+    Default: surfalytics-github-serverless
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$'
+    Description: >
+      Must match the `service` name in 04_aws_lambda_serverless_deploy/serverless.yml.
+      Used to scope CloudFormation stacks and deployment buckets created by Serverless.
+
+Resources:
+  IngestionServerlessDeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-serverless-deploy'
+      Users:
+        - !Ref IngestionUserName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudFormationStacksForServerlessService
+            Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:DeleteStack
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResources
+              - cloudformation:DescribeStackResource
+              - cloudformation:ListStackResources
+              - cloudformation:GetTemplate
+              - cloudformation:CreateChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:ContinueUpdateRollback
+              - cloudformation:SetStackPolicy
+              - cloudformation:GetStackPolicy
+              - cloudformation:TagResource
+              - cloudformation:UntagResource
+            Resource:
+              - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ServerlessServicePrefix}-*/*'
+
+          - Sid: CloudFormationChangeSetAndListReads
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeChangeSet
+              - cloudformation:ListChangeSets
+              - cloudformation:ListStacks
+              - cloudformation:ValidateTemplate
+            Resource: '*'
+
+          # Serverless resolves ${cf:stack-name.Output} at deploy time via DescribeStacks.
+          - Sid: CloudFormationReadImportedStacks
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackResources
+            Resource:
+              - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/surfalytics-iam/*'
+              - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/surfalytics-03-lambda/*'
+
+          - Sid: ServerlessDeploymentS3Buckets
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:ListBucket
+              - s3:HeadBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+              - s3:GetEncryptionConfiguration
+              - s3:PutEncryptionConfiguration
+              - s3:PutBucketTagging
+              - s3:GetBucketTagging
+              - s3:PutBucketPolicy
+              - s3:GetBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:PutLifecycleConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub 'arn:aws:s3:::${ServerlessServicePrefix}*'
+              - !Sub 'arn:aws:s3:::${ServerlessServicePrefix}*/*'
+              - 'arn:aws:s3:::surfalytics-github-server-*'
+              - 'arn:aws:s3:::surfalytics-github-server-*/*'
+
+          - Sid: LambdaLifecycleForServerless
+            Effect: Allow
+            Action:
+              - lambda:DeleteFunction
+              - lambda:PublishVersion
+              - lambda:GetPolicy
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:ListVersionsByFunction
+              - lambda:TagResource
+              - lambda:UntagResource
+            Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:surfalytics-*'
+
+          - Sid: CloudWatchLogsForServerlessLambda
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:DescribeLogGroups
+              - logs:PutRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/surfalytics-*'
+
+Outputs:
+  ManagedPolicyArn:
+    Description: ARN of the Serverless deploy supplemental policy.
+    Value: !Ref IngestionServerlessDeployPolicy

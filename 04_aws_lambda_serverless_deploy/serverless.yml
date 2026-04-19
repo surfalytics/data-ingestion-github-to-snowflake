@@ -1,0 +1,53 @@
+# Week 4 — same Lambda behavior as 03_aws_lambda, deployed via Serverless Framework v3.
+# Runtime IAM: use the named role surfalytics-lambda-github-role (S3 + Secrets Manager) created by
+# deploy-raw-csv-stack.sh or deploy-stack.sh 03 — same role Week 3 deploy.sh looks up by name.
+# ARN is built from ${aws:accountId} so we do not rely on ${cf:...} (avoids Serverless resolver bugs).
+
+service: surfalytics-github-serverless
+
+frameworkVersion: '3'
+
+custom:
+  pythonRequirements:
+    dockerizePip: non-linux
+    slim: true
+    strip: false
+    noDeploy:
+      - boto3
+      - botocore
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 512
+  timeout: 300
+  # Named IAM role from CloudFormation (same as 03_aws_lambda/deploy.sh ROLE_NAME).
+  # To use another role, replace this line with: role: ${env:LAMBDA_ROLE_ARN} and export LAMBDA_ROLE_ARN.
+  role: 'arn:aws:iam::${aws:accountId}:role/surfalytics-lambda-github-role'
+  layers:
+    - arn:aws:lambda:${self:provider.region}:336392948345:layer:AWSSDKPandas-Python311:23
+  environment:
+    S3_BUCKET: ${env:S3_BUCKET, 'surfalytics-raw-csv-180795190369'}
+    TARGET_ROWS: ${env:TARGET_ROWS, '1000'}
+    S3_PREFIX: ${env:S3_PREFIX, 'github-data'}
+    GITHUB_TOKEN_SECRET_NAME: ${env:GITHUB_TOKEN_SECRET_NAME, 'surfalytics/data-ingestion/github-token'}
+    # Do not set AWS_REGION — Lambda reserves it and sets it automatically.
+
+plugins:
+  - serverless-python-requirements
+
+package:
+  patterns:
+    - '!node_modules/**'
+    - '!README.md'
+    - 'src/**'
+
+functions:
+  githubIngest:
+    # Distinct from Week 3 CLI function (surfalytics-github-ingest) to avoid "already exists".
+    # To adopt the original name: delete the CLI-created function, then set name to surfalytics-github-ingest.
+    name: surfalytics-github-ingest-sls-${sls:stage}
+    handler: src.extract_github_data.lambda_handler
+    description: GitHub repo metadata to S3 (Serverless deploy; same logic as 03_aws_lambda)

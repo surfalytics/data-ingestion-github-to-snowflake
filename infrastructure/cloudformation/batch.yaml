@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS Batch (Fargate) infrastructure for the surfalytics GitHub ingestion pipeline.
+  Creates an ECR repository, CloudWatch log group, Fargate compute environment,
+  job queue, and job definition. Zero IAM resources — imports the execution role
+  from the iam.yaml stack (surfalytics-iam).
+  Prerequisites: deploy iam.yaml first.
+  Deploy with: BATCH_SUBNET_ID=<id> BATCH_SG_ID=<id> bash infrastructure/scripts/deploy-stack.sh batch
+
+Parameters:
+  BucketNamePrefix:
+    Type: String
+    Default: surfalytics-raw-csv
+    Description: Bucket name is ${Prefix}-${AWS::AccountId}. Used to set S3_BUCKET env var in the job definition.
+
+  ECRRepositoryName:
+    Type: String
+    Default: surfalytics-github-ingest
+    Description: ECR repository name for the Batch container image.
+
+  GitHubTokenSecretName:
+    Type: String
+    Default: surfalytics/data-ingestion/github-token
+    Description: Secrets Manager secret name for the GitHub PAT.
+
+  IAMStackName:
+    Type: String
+    Default: surfalytics-iam
+    Description: >
+      Name of the IAM stack that exports LambdaExecutionRoleArn.
+      The import key is ${IAMStackName}-LambdaExecutionRoleArn.
+      Use surfalytics-iam (new) or surfalytics-03-lambda (legacy).
+
+  BatchSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >
+      Subnet ID for the Fargate compute environment.
+      Get the default VPC subnet:
+        aws ec2 describe-subnets --filters Name=default-for-az,Values=true
+          --query 'Subnets[0].SubnetId' --output text --profile local
+
+  BatchSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >
+      Security group for the Fargate compute environment.
+      Get the default VPC security group:
+        aws ec2 describe-security-groups --filters Name=group-name,Values=default
+          --query 'SecurityGroups[0].GroupId' --output text --profile local
+
+Resources:
+
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ECRRepositoryName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep last 5 images",
+              "selection": {
+                "tagStatus": "any",
+                "countType": "imageCountMoreThan",
+                "countNumber": 5
+              },
+              "action": { "type": "expire" }
+            }]
+          }
+      Tags:
+        - Key: Purpose
+          Value: surfalytics-batch-github-ingest
+
+  BatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/batch/surfalytics-github-ingest
+      RetentionInDays: 14
+
+  BatchComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      ComputeEnvironmentName: surfalytics-batch-fargate
+      Type: MANAGED
+      State: ENABLED
+      ComputeResources:
+        Type: FARGATE
+        MaxvCpus: 4
+        Subnets:
+          - !Ref BatchSubnetId
+        SecurityGroupIds:
+          - !Ref BatchSecurityGroupId
+      Tags:
+        Purpose: surfalytics-batch-github-ingest
+
+  BatchJobQueue:
+    Type: AWS::Batch::JobQueue
+    DependsOn: BatchComputeEnvironment
+    Properties:
+      JobQueueName: surfalytics-github-ingest-queue
+      State: ENABLED
+      Priority: 1
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref BatchComputeEnvironment
+      Tags:
+        Purpose: surfalytics-batch-github-ingest
+
+  BatchJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: surfalytics-github-ingest-job
+      Type: container
+      PlatformCapabilities:
+        - FARGATE
+      ContainerProperties:
+        # Placeholder image — deploy.sh registers a new revision with the real ECR image.
+        Image: public.ecr.aws/amazonlinux/amazonlinux:latest
+        ExecutionRoleArn: !ImportValue
+          'Fn::Sub': '${IAMStackName}-LambdaExecutionRoleArn'
+        JobRoleArn: !ImportValue
+          'Fn::Sub': '${IAMStackName}-LambdaExecutionRoleArn'
+        ResourceRequirements:
+          - Type: VCPU
+            Value: '0.5'
+          - Type: MEMORY
+            Value: '1024'
+        Command:
+          - --target-rows
+          - '1000'
+        Environment:
+          - Name: AWS_REGION
+            Value: !Ref 'AWS::Region'
+          - Name: S3_BUCKET
+            Value: !Sub '${BucketNamePrefix}-${AWS::AccountId}'
+          - Name: S3_PREFIX
+            Value: github-data
+          - Name: GITHUB_TOKEN_SECRET_NAME
+            Value: !Ref GitHubTokenSecretName
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref BatchLogGroup
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: batch
+        NetworkConfiguration:
+          AssignPublicIp: ENABLED
+        FargatePlatformConfiguration:
+          PlatformVersion: LATEST
+      RetryStrategy:
+        Attempts: 1
+      Timeout:
+        AttemptDurationSeconds: 600
+      Tags:
+        Purpose: surfalytics-batch-github-ingest
+
+Outputs:
+  ECRRepositoryUri:
+    Description: Full ECR URI for docker push (without tag).
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepositoryName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryUri'
+
+  JobDefinitionArn:
+    Description: ARN of the Batch Job Definition (placeholder revision — run deploy.sh to register the real image).
+    Value: !Ref BatchJobDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-JobDefinitionArn'
+
+  JobQueueArn:
+    Description: ARN of the Batch Job Queue.
+    Value: !Ref BatchJobQueue
+    Export:
+      Name: !Sub '${AWS::StackName}-JobQueueArn'

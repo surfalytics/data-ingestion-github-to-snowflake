@@ -1,0 +1,13 @@
+{
+  "name": "surfalytics-github-serverless",
+  "private": true,
+  "devDependencies": {
+    "serverless": "^3.38.0",
+    "serverless-python-requirements": "^6.1.0"
+  },
+  "scripts": {
+    "deploy": "serverless deploy",
+    "remove": "serverless remove",
+    "invoke": "serverless invoke -f githubIngest -p payload.json"
+  }
+}
