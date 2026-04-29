@@ -31,6 +31,11 @@ Parameters:
       The import key is ${IAMStackName}-LambdaExecutionRoleArn.
       Use surfalytics-iam (new) or surfalytics-03-lambda (legacy).
 
+  LambdaFunctionName:
+    Type: String
+    Default: surfalytics-github-ingest-sls-dev
+    Description: Name of the Lambda function to invoke from the Lambda-invoker job definition.
+
   BatchSubnetId:
     Type: AWS::EC2::Subnet::Id
     Description: >
@@ -77,6 +82,12 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /aws/batch/surfalytics-github-ingest
+      RetentionInDays: 14
+
+  LambdaInvokerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/batch/surfalytics-lambda-invoker
       RetentionInDays: 14
 
   BatchComputeEnvironment:
@@ -156,6 +167,58 @@ Resources:
       Tags:
         Purpose: surfalytics-batch-github-ingest
 
+  LambdaInvokerJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: surfalytics-lambda-invoker-job
+      Type: container
+      PlatformCapabilities:
+        - FARGATE
+      ContainerProperties:
+        # Mirrored from public.ecr.aws/aws-cli/aws-cli:latest into private ECR.
+        # Public ECR is unreachable from this VPC; private ECR works via VPC endpoint.
+        # ENTRYPOINT is /usr/local/bin/aws, so Command maps to AWS CLI subcommands.
+        Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepositoryName}:aws-cli'
+        ExecutionRoleArn: !ImportValue
+          'Fn::Sub': '${IAMStackName}-LambdaExecutionRoleArn'
+        JobRoleArn: !ImportValue
+          'Fn::Sub': '${IAMStackName}-LambdaExecutionRoleArn'
+        ResourceRequirements:
+          - Type: VCPU
+            Value: '0.25'
+          - Type: MEMORY
+            Value: '512'
+        Command:
+          - lambda
+          - invoke
+          - --function-name
+          - !Ref LambdaFunctionName
+          - --region
+          - !Ref AWS::Region
+          - --invocation-type
+          - RequestResponse
+          - --cli-binary-format
+          - raw-in-base64-out
+          - --payload
+          - '{"target_rows": 1000}'
+          - /tmp/response.json
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref LambdaInvokerLogGroup
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: batch
+        NetworkConfiguration:
+          AssignPublicIp: ENABLED
+        FargatePlatformConfiguration:
+          PlatformVersion: LATEST
+      RetryStrategy:
+        Attempts: 1
+      Timeout:
+        AttemptDurationSeconds: 300
+      Tags:
+        Purpose: surfalytics-batch-lambda-invoker
+
 Outputs:
   ECRRepositoryUri:
     Description: Full ECR URI for docker push (without tag).
@@ -174,3 +237,9 @@ Outputs:
     Value: !Ref BatchJobQueue
     Export:
       Name: !Sub '${AWS::StackName}-JobQueueArn'
+
+  LambdaInvokerJobDefinitionArn:
+    Description: ARN of the Lambda-invoker Batch job definition.
+    Value: !Ref LambdaInvokerJobDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaInvokerJobDefinitionArn'

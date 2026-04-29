@@ -1,0 +1,12 @@
+---
+description: Authoritative project context lives in CLAUDE.md — read it for stacks, deploy order, and weeks 1–5
+alwaysApply: true
+---
+
+# Project guide — use `CLAUDE.md`
+
+All **project context, AWS setup, CloudFormation layout, deploy order, week-by-week runbooks, script architecture, and environment variables** for this repo are maintained in **`CLAUDE.md`** at the repository root.
+
+When you work on **infrastructure**, **deploy scripts**, **Lambda/Batch/Serverless**, **Docker**, or **`extract_github_data.py`** across week folders, **read `CLAUDE.md` first** (or follow it if already in context) so guidance stays aligned with the documented stacks, profiles (`local` vs `surfalytics-lab`), IAM design, and data flow.
+
+Do not contradict `CLAUDE.md` without an explicit user request to change documented behavior.

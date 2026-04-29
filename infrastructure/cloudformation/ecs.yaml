@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ECS Fargate cluster + task definition for running the surfalytics GitHub
+  ingest container. Used as a target for Step Functions ecs:runTask.sync.
+  Prerequisites: deploy iam.yaml (exports execution role) and push the
+  container image to ECR (05_aws_batch_for_docker_container/deploy.sh).
+  Deploy with: bash infrastructure/scripts/deploy-stack.sh ecs
+
+Parameters:
+  BucketNamePrefix:
+    Type: String
+    Default: surfalytics-raw-csv
+    Description: Bucket name is ${Prefix}-${AWS::AccountId}.
+
+  ECRRepositoryName:
+    Type: String
+    Default: surfalytics-github-ingest
+    Description: ECR repository that holds the ingest container image.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: ECR image tag the task runs.
+
+  GitHubTokenSecretName:
+    Type: String
+    Default: surfalytics/data-ingestion/github-token
+    Description: Secrets Manager secret name for the GitHub PAT.
+
+  IAMStackName:
+    Type: String
+    Default: surfalytics-iam
+    Description: IAM stack that exports LambdaExecutionRoleArn.
+
+Resources:
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: surfalytics-github-ingest-cluster
+      CapacityProviders:
+        - FARGATE
+      Tags:
+        - Key: Purpose
+          Value: surfalytics-ecs-github-ingest
+
+  EcsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/surfalytics-github-ingest
+      RetentionInDays: 14
+
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: surfalytics-github-ingest-task
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !ImportValue
+        'Fn::Sub': '${IAMStackName}-LambdaExecutionRoleArn'
+      TaskRoleArn: !ImportValue
+        'Fn::Sub': '${IAMStackName}-LambdaExecutionRoleArn'
+      ContainerDefinitions:
+        - Name: ingest
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepositoryName}:${ImageTag}'
+          Essential: true
+          # Baseline command; Step Functions overrides this via ContainerOverrides.
+          Command:
+            - --target-rows
+            - '1000'
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: S3_BUCKET
+              Value: !Sub '${BucketNamePrefix}-${AWS::AccountId}'
+            - Name: S3_PREFIX
+              Value: github-data
+            - Name: GITHUB_TOKEN_SECRET_NAME
+              Value: !Ref GitHubTokenSecretName
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+Outputs:
+  EcsClusterName:
+    Description: ECS cluster name.
+    Value: !Ref EcsCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-EcsClusterName'
+
+  EcsClusterArn:
+    Description: ECS cluster ARN.
+    Value: !GetAtt EcsCluster.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-EcsClusterArn'
+
+  EcsTaskDefinitionArn:
+    Description: Task definition ARN (latest revision).
+    Value: !Ref EcsTaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-EcsTaskDefinitionArn'
+
+  EcsContainerName:
+    Description: Container name inside the task definition; used by ContainerOverrides.
+    Value: ingest
+    Export:
+      Name: !Sub '${AWS::StackName}-EcsContainerName'

@@ -22,6 +22,22 @@ Parameters:
     Default: surfalytics/data-ingestion/github-token
     Description: Secrets Manager secret name for the GitHub PAT.
 
+  SLSLambdaFunctionName:
+    Type: String
+    Default: surfalytics-github-ingest-sls-dev
+    Description: Lambda function name the Batch Lambda-invoker job will call.
+
+  LambdaEnvironmentKmsKeyId:
+    Type: String
+    Default: ''
+    Description: >
+      Optional KMS key ID or ARN (same account/region) used to encrypt the ingest Lambda's
+      environment variables. When set, creates a KMS grant so surfalytics-lambda-github-role
+      can decrypt. Deployer must have kms:CreateGrant on that key. Leave empty to skip.
+
+Conditions:
+  CreateLambdaEnvKmsGrant: !Not [!Equals [!Ref LambdaEnvironmentKmsKeyId, '']]
+
 Resources:
 
   # ── Ingestion user policies ───────────────────────────────────────────────────
@@ -142,6 +158,17 @@ Resources:
               - batch:RegisterJobDefinition
               - batch:DeregisterJobDefinition
             Resource: !Sub 'arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-definition/surfalytics-*'
+          - Sid: StepFunctionsRun
+            Effect: Allow
+            Action:
+              - states:StartExecution
+              - states:DescribeExecution
+              - states:GetExecutionHistory
+              - states:ListExecutions
+              - states:StopExecution
+            Resource:
+              - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:surfalytics-*'
+              - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:surfalytics-*:*'
 
   # ── Shared execution role (Lambda + Fargate/Batch) ────────────────────────────
   # Assumed at runtime by Lambda functions and Fargate Batch tasks.
@@ -204,9 +231,47 @@ Resources:
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchCheckLayerAvailability
                 Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/surfalytics-*'
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeSLSFunction
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${SLSLambdaFunctionName}'
+        - PolicyName: KMSDecryptLambdaEnv
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DecryptLambdaEnvVars
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:CreateGrant
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
       Tags:
         - Key: Purpose
           Value: surfalytics-ingest
+
+  # Grant execution role use of an existing CMK when Lambda env vars are encrypted with it.
+  # Avoids hand-editing the key policy if the deployer may kms:CreateGrant on the key.
+  LambdaEnvironmentKmsGrant:
+    Type: AWS::KMS::Grant
+    Condition: CreateLambdaEnvKmsGrant
+    Properties:
+      KeyId: !Ref LambdaEnvironmentKmsKeyId
+      GranteePrincipal: !GetAtt ExecutionRole.Arn
+      Operations:
+        - Decrypt
+        - DescribeKey
+        - Encrypt
+        - ReEncryptFrom
+        - ReEncryptTo
+        - GenerateDataKey
+        - GenerateDataKeyWithoutPlaintext
+        - CreateGrant
 
 Outputs:
   ExecutionRoleArn:

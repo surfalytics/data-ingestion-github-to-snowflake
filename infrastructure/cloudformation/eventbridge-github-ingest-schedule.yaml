@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Amazon EventBridge rule on a schedule that starts the GitHub ingest Step Functions
+  state machine (same pattern as Week 6). Deploy with:
+  bash infrastructure/scripts/deploy-stack.sh eventbridge
+
+Parameters:
+  StateMachineArn:
+    Type: String
+    Default: ''
+    Description: >
+      Full state machine ARN. Leave empty to build from StateMachineName in this
+      account and region (recommended when the state machine is deployed here).
+
+  StateMachineName:
+    Type: String
+    Default: surfalytics-github-ingest-pipeline
+    Description: Used only when StateMachineArn is empty.
+
+  ScheduleExpression:
+    Type: String
+    Default: cron(0 6 * * ? *)
+    Description: >
+      EventBridge schedule (UTC). Default runs daily at 06:00 UTC. See AWS docs for
+      rate() and cron() syntax.
+
+  ScheduleExecutionInput:
+    Type: String
+    Default: '{"target_rows":100}'
+    Description: >
+      JSON passed as StartExecution input. Must match what the state machine expects
+      (top-level target_rows for surfalytics-github-ingest-pipeline).
+
+Conditions:
+  UseCustomStateMachineArn: !Not [!Equals [!Ref StateMachineArn, '']]
+
+Resources:
+  ScheduledIngestRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: surfalytics-github-ingest-pipeline-schedule
+      Description: Periodic start of surfalytics-github-ingest-pipeline Step Functions workflow.
+      State: ENABLED
+      ScheduleExpression: !Ref ScheduleExpression
+      Targets:
+        - Id: StartGithubIngestPipeline
+          Arn: !If
+            - UseCustomStateMachineArn
+            - !Ref StateMachineArn
+            - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${StateMachineName}'
+          RoleArn: !GetAtt EventBridgeStartExecutionRole.Arn
+          Input: !Ref ScheduleExecutionInput
+
+  EventBridgeStartExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: surfalytics-eventbridge-start-github-ingest-sfn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartGithubIngestStateMachine
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !If
+                  - UseCustomStateMachineArn
+                  - !Ref StateMachineArn
+                  - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${StateMachineName}'
+
+Outputs:
+  RuleName:
+    Description: EventBridge rule name.
+    Value: !Ref ScheduledIngestRule
+  RuleArn:
+    Description: EventBridge rule ARN (for debugging and console links).
+    Value: !GetAtt ScheduledIngestRule.Arn
+  TargetStateMachineArn:
+    Description: State machine ARN the schedule invokes.
+    Value: !If
+      - UseCustomStateMachineArn
+      - !Ref StateMachineArn
+      - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${StateMachineName}'

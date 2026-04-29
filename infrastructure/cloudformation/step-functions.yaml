@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS Step Functions state machine that runs the GitHub ingest Lambda (Week 3).
+  Pass state shapes input, then Task invokes Lambda via the AWS SDK integration.
+  Prerequisites: deploy iam.yaml first; Lambda function must exist (see GitHubIngestFunctionName).
+  Deploy with: bash infrastructure/scripts/deploy-stack.sh stepfunctions
+
+Parameters:
+  GitHubIngestFunctionName:
+    Type: String
+    Default: surfalytics-github-ingest
+    Description: >
+      Lambda function name only (not an ARN). Passed to lambda:invoke FunctionName.
+
+  BatchJobDefinitionName:
+    Type: String
+    Default: surfalytics-github-ingest-job
+    Description: Batch job definition name used by the dual-pipeline state machine.
+
+  BatchJobQueueName:
+    Type: String
+    Default: surfalytics-github-ingest-queue
+    Description: Batch job queue name used by the dual-pipeline state machine.
+
+  EcsStackName:
+    Type: String
+    Default: surfalytics-ecs
+    Description: >
+      ECS stack that exports the cluster name, task definition ARN, and container
+      name used by the 3rd (ECS) state in the full pipeline.
+
+  EcsSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet for the ECS Fargate task.
+
+  EcsSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group for the ECS Fargate task.
+
+Resources:
+  StepFunctionsInvokeLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: surfalytics-stepfunctions-github-ingest
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeIngestLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${GitHubIngestFunctionName}'
+
+  GithubIngestStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: surfalytics-github-ingest-pipeline
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsInvokeLambdaRole.Arn
+      DefinitionString:
+        Fn::Sub:
+          - |
+            {
+              "Comment": "Annotate input then invoke GitHub ingest Lambda",
+              "StartAt": "AnnotateRun",
+              "States": {
+                "AnnotateRun": {
+                  "Type": "Pass",
+                  "Comment": "Shape state for the Lambda Task; no AWS side effects",
+                  "Parameters": {
+                    "pipeline.$": "$",
+                    "orchestrator": {
+                      "name": "surfalytics-github-ingest-pipeline",
+                      "version": "1"
+                    }
+                  },
+                  "ResultPath": "$",
+                  "Next": "InvokeIngestLambda"
+                },
+                "InvokeIngestLambda": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${GitHubIngestFnName}",
+                    "Payload": {
+                      "target_rows.$": "$.pipeline.target_rows"
+                    }
+                  },
+                  "End": true
+                }
+              }
+            }
+          - GitHubIngestFnName: !Ref GitHubIngestFunctionName
+
+  # ── Full pipeline: Lambda → Docker-on-Batch → Docker-on-ECS, sequential ─────
+  FullPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: surfalytics-stepfunctions-full-ingest
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaBatchAndEcs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeIngestLambda
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${GitHubIngestFunctionName}'
+              - Sid: SubmitAndTrackBatchJob
+                Effect: Allow
+                Action:
+                  - batch:SubmitJob
+                  - batch:DescribeJobs
+                  - batch:TerminateJob
+                Resource: '*'
+              - Sid: ManagedBatchEventsRule
+                Effect: Allow
+                Action:
+                  - events:PutTargets
+                  - events:PutRule
+                  - events:DescribeRule
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForBatchJobsRule'
+              - Sid: RunAndTrackEcsTask
+                Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:StopTask
+                  - ecs:DescribeTasks
+                Resource: '*'
+              # Step Functions hands the ECS task a role — both the task execution
+              # role and the task role belong to the Lambda/Batch shared role.
+              - Sid: PassRoleToEcsTask
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/surfalytics-lambda-github-role'
+              # Managed EventBridge rule Step Functions uses for ECS task state.
+              - Sid: ManagedEcsEventsRule
+                Effect: Allow
+                Action:
+                  - events:PutTargets
+                  - events:PutRule
+                  - events:DescribeRule
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule'
+
+  GithubIngestFullStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: surfalytics-github-ingest-full-pipeline
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt FullPipelineRole.Arn
+      DefinitionString:
+        Fn::Sub:
+          - |
+            {
+              "Comment": "Run GitHub ingest three ways: Lambda -> Docker on Batch -> Docker on ECS. Same python code, same args.",
+              "StartAt": "InvokeIngestLambda",
+              "States": {
+                "InvokeIngestLambda": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${GitHubIngestFnName}",
+                    "Payload": {
+                      "target_rows.$": "$.target_rows"
+                    }
+                  },
+                  "ResultPath": "$.lambdaResult",
+                  "Next": "RunIngestOnBatch"
+                },
+                "RunIngestOnBatch": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::batch:submitJob.sync",
+                  "Parameters": {
+                    "JobName": "surfalytics-github-ingest-from-sfn",
+                    "JobDefinition": "${BatchJobDef}",
+                    "JobQueue": "${BatchJobQ}",
+                    "ContainerOverrides": {
+                      "Command.$": "States.Array('--target-rows', States.Format('{}', $.target_rows))"
+                    }
+                  },
+                  "ResultPath": "$.batchResult",
+                  "Next": "RunIngestOnEcs"
+                },
+                "RunIngestOnEcs": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::ecs:runTask.sync",
+                  "Parameters": {
+                    "LaunchType": "FARGATE",
+                    "Cluster": "${EcsClusterName}",
+                    "TaskDefinition": "${EcsTaskDefArn}",
+                    "NetworkConfiguration": {
+                      "AwsvpcConfiguration": {
+                        "Subnets": ["${EcsSubnet}"],
+                        "SecurityGroups": ["${EcsSg}"],
+                        "AssignPublicIp": "ENABLED"
+                      }
+                    },
+                    "Overrides": {
+                      "ContainerOverrides": [
+                        {
+                          "Name": "${EcsContainer}",
+                          "Command.$": "States.Array('--target-rows', States.Format('{}', $.target_rows))"
+                        }
+                      ]
+                    }
+                  },
+                  "ResultPath": "$.ecsResult",
+                  "End": true
+                }
+              }
+            }
+          - GitHubIngestFnName: !Ref GitHubIngestFunctionName
+            BatchJobDef: !Ref BatchJobDefinitionName
+            BatchJobQ: !Ref BatchJobQueueName
+            EcsClusterName:
+              Fn::ImportValue: !Sub '${EcsStackName}-EcsClusterName'
+            EcsTaskDefArn:
+              Fn::ImportValue: !Sub '${EcsStackName}-EcsTaskDefinitionArn'
+            EcsContainer:
+              Fn::ImportValue: !Sub '${EcsStackName}-EcsContainerName'
+            EcsSubnet: !Ref EcsSubnetId
+            EcsSg: !Ref EcsSecurityGroupId
+
+Outputs:
+  StateMachineArn:
+    Description: ARN of the state machine (use with start-execution).
+    Value: !Ref GithubIngestStateMachine
+  StateMachineName:
+    Description: State machine name for CLI and IAM scoping.
+    Value: surfalytics-github-ingest-pipeline
+  FullStateMachineArn:
+    Description: ARN of the Lambda → Batch → ECS full state machine.
+    Value: !Ref GithubIngestFullStateMachine
+  FullStateMachineName:
+    Description: Full state machine name.
+    Value: surfalytics-github-ingest-full-pipeline
